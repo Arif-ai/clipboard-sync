@@ -107,7 +107,6 @@ def get_local_ip():
 LOCAL_IP  = get_local_ip()
 start_now = time.time()
 
-# Separate PC and Mobile state to prevent overwrite loops and conflicts
 pc_state = {
     "type": "text",
     "text": "Server Ready",
@@ -141,7 +140,7 @@ def set_pc_image_clipboard(data):
                     f'set the clipboard to theClipboard'
                 )
                 subprocess.run(["osascript", "-e", script], capture_output=True)
-        else:  # Linux (xclip / wl-clipboard)
+        else:  # Linux
             try:
                 subprocess.run(["xclip", "-selection", "clipboard", "-target", "image/png", "-i", tmp_path], capture_output=True)
             except Exception:
@@ -149,7 +148,7 @@ def set_pc_image_clipboard(data):
     except Exception as e:
         gui_log(f"Clipboard image write error: {e}", "ERROR")
 
-# ─── Logging & Security Middleware ─────────────────────────────────────────────
+# ─── Logging & CORS Security Middleware ──────────────────────────────────────
 def gui_log(msg, tag="INFO"):
     """Queue formatted log messages for thread-safe UI rendering."""
     ts = time.strftime("%H:%M:%S")
@@ -171,37 +170,31 @@ def is_rate_limited(ip):
         _rate_map[ip].append(now)
     return False
 
-# Internal UI-only paths that bypass all security checks
-_INTERNAL_PATHS = ("/api/logs", "/api/toggle-status", "/secret")
+_INTERNAL_PATHS = ("/api/logs", "/api/toggle-status", "/api/restart", "/secret")
 
 def check_request():
     """Security filter executed before every API request."""
-    # Internal dashboard endpoints bypass all security and active checks
-    if request.path in _INTERNAL_PATHS:
+    clean_path = request.path.rstrip("/")
+    if clean_path in _INTERNAL_PATHS:
         return
 
-    # Block all clipboard sync when server is deactivated
     if not is_active:
         gui_log("Blocked request: Server is DEACTIVATED", "WARN")
         abort(503, "AirClip server is currently deactivated by user")
 
     client_ip = request.remote_addr or ""
 
-    # 1. LAN-Only Guard
     if not is_private_ip(client_ip):
         gui_log(f"BLOCKED non-LAN request from {client_ip}", "WARN")
         abort(403, "Access restricted to local network")
 
-    # 2. Rate Limiting
     if is_rate_limited(client_ip):
         gui_log(f"RATE-LIMITED {client_ip}", "WARN")
         abort(429, "Too many requests")
 
-    # 3. Payload Cap
     if request.content_length and request.content_length > MAX_PAYLOAD:
         abort(413, "Payload exceeds 10MB cap")
 
-    # 4. Auth Token Verification (timing-safe)
     token = (
         request.headers.get("X-ClipSync-Token")
         or request.args.get("token")
@@ -212,6 +205,14 @@ def check_request():
         abort(401, "Invalid or missing auth token")
 
 app.before_request(check_request)
+
+@app.after_request
+def add_cors_headers(response):
+    """Ensure CORS preflight and headers never block iOS Shortcuts or Web API calls."""
+    response.headers["Access-Control-Allow-Origin"]  = "*"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return response
 
 # ─── API Endpoints & Developer Secret ──────────────────────────────────────────
 @app.route("/secret", methods=["GET"])
@@ -238,26 +239,30 @@ def toggle_status_api():
         gui_log(f"Server state changed to {status_str}", "INFO")
         return jsonify({"active": is_active})
 
-@app.route("/get",      methods=["GET", "POST"])
-@app.route("/get-clip", methods=["GET", "POST"])
-def get_pc_clipboard():
-    """Send current PC clipboard content (text or screenshot) to iPhone."""
-    try:
-        if pc_state["type"] == "text" and pc_state.get("text"):
-            gui_log(f"PC → iPhone: '{pc_state['text'][:50]}'", "SEND")
-            return Response(pc_state["text"], status=200, content_type="text/plain; charset=utf-8")
-        elif pc_state["type"] == "image" and pc_state.get("image_bytes"):
-            gui_log("PC → iPhone: Screenshot/Image", "SEND")
-            return send_file(io.BytesIO(pc_state["image_bytes"]), mimetype="image/png")
-    except Exception as e:
-        gui_log(f"GET error: {e}", "ERROR")
-    return Response(status=204)
+@app.route("/api/restart", methods=["POST"])
+def restart_server_api():
+    """Reset AirClip server state and clear caches."""
+    global pc_state, last_pc_clipboard_text, last_pc_clipboard_img
+    pc_state = {
+        "type": "text",
+        "text": "Server Ready",
+        "image_bytes": None,
+        "timestamp": time.time()
+    }
+    last_pc_clipboard_text = None
+    last_pc_clipboard_img  = None
+    with _rate_lock:
+        _rate_map.clear()
+    gui_log("Server state restarted cleanly", "INFO")
+    return jsonify({"status": "ok"})
 
-@app.route("/send",      methods=["POST"])
-@app.route("/send-clip", methods=["POST"])
+@app.route("/send",      methods=["POST", "OPTIONS"])
+@app.route("/send-clip", methods=["POST", "OPTIONS"])
 def send_iphone_clipboard():
     """Receive copied content (text or image) from iPhone and apply to PC clipboard."""
     global last_pc_clipboard_text, last_pc_clipboard_img
+    if request.method == "OPTIONS":
+        return Response(status=200)
     try:
         data         = request.data or b""
         content_type = request.headers.get("Content-Type", "").lower()
@@ -272,8 +277,8 @@ def send_iphone_clipboard():
         elif data:
             text = extract_text_from_incoming(data)
             if text and '{"status"' not in text and not text.startswith("bplist00"):
+                last_pc_clipboard_text = text  # Update tracker BEFORE copying to prevent echo loop
                 pyperclip.copy(text)
-                last_pc_clipboard_text = text
                 pc_state.update({"type": "text", "text": text, "timestamp": time.time()})
                 gui_log(f"iPhone → PC: '{text[:50]}'", "RECV")
                 return jsonify({"status": "ok", "type": "text"}), 200
@@ -281,40 +286,21 @@ def send_iphone_clipboard():
         gui_log(f"SEND error: {e}", "ERROR")
     return Response(status=204)
 
-@app.route("/",          methods=["GET", "POST"])
-@app.route("/sync",      methods=["GET", "POST"])
-@app.route("/sync/",     methods=["GET", "POST"])
-@app.route("/clip",      methods=["GET", "POST"])
-@app.route("/clip/",     methods=["GET", "POST"])
-@app.route("/clipboard", methods=["GET", "POST"])
-@app.route("/clipboard/",methods=["GET", "POST"])
-def sync_clipboard():
-    """Unified bidirectional sync endpoint with conflict & overwrite protection."""
-    global last_pc_clipboard_text, last_pc_clipboard_img
+@app.route("/get",      methods=["GET", "POST", "OPTIONS"])
+@app.route("/get-clip", methods=["GET", "POST", "OPTIONS"])
+def get_pc_clipboard():
+    """Send current PC clipboard content (text or screenshot) to iPhone."""
+    if request.method == "OPTIONS":
+        return Response(status=200)
     try:
-        data = request.data or b""
-        # If payload provided, update PC clipboard (iPhone → PC)
-        if data:
-            content_type = request.headers.get("Content-Type", "").lower()
-            if "image" in content_type or "octet-stream" in content_type:
-                set_pc_image_clipboard(data)
-                last_pc_clipboard_img = data
-                pc_state.update({"type": "image", "image_bytes": data, "timestamp": time.time()})
-                gui_log("iPhone → PC: Image received", "RECV")
-                return jsonify({"status": "ok", "type": "image"}), 200
-            else:
-                text = extract_text_from_incoming(data)
-                if text and '{"status"' not in text and not text.startswith("bplist00"):
-                    pyperclip.copy(text)
-                    last_pc_clipboard_text = text
-                    pc_state.update({"type": "text", "text": text, "timestamp": time.time()})
-                    gui_log(f"iPhone → PC: '{text[:50]}'", "RECV")
-                    return jsonify({"status": "ok", "type": "text"}), 200
-        else:
-            # If no payload, fetch PC clipboard (PC → iPhone)
-            return get_pc_clipboard()
+        if pc_state["type"] == "text" and pc_state.get("text"):
+            gui_log(f"PC → iPhone: '{pc_state['text'][:50]}'", "SEND")
+            return Response(pc_state["text"], status=200, content_type="text/plain; charset=utf-8")
+        elif pc_state["type"] == "image" and pc_state.get("image_bytes"):
+            gui_log("PC → iPhone: Screenshot/Image", "SEND")
+            return send_file(io.BytesIO(pc_state["image_bytes"]), mimetype="image/png")
     except Exception as e:
-        gui_log(f"Sync error: {e}", "ERROR")
+        gui_log(f"GET error: {e}", "ERROR")
     return Response(status=204)
 
 # ─── PC Clipboard Background Monitor ──────────────────────────────────────────
@@ -341,9 +327,10 @@ def monitor_pc_clipboard():
                 # 2. Check for text on PC clipboard
                 text = pyperclip.paste()
                 if text and text != last_pc_clipboard_text:
-                    if '{"status"' in text or "bplist00" in text or "WebMainResource" in text:
-                        pyperclip.copy("")
-                        last_pc_clipboard_text = ""
+                    # Ignore internal temp file paths, status JSON, or binary plists
+                    if ("iphone_clip_" in text or "clipboard_sync" in text or "dist\\" in text 
+                        or "dist/" in text or '{"status"' in text or "bplist00" in text or "WebMainResource" in text):
+                        last_pc_clipboard_text = text
                         continue
                     if "{\\rtf1" in text:
                         text = extract_rtf_text(text)
@@ -461,9 +448,8 @@ def build_html():
     -webkit-backdrop-filter: blur(24px) saturate(180%);
     animation: slideDown 0.5s cubic-bezier(0.16,1,0.3,1) both;
   }}
-  .brand {{ display: flex; align-items: center; gap: 10px; }}
+  .brand {{ display: flex; align-items: center; gap: 10px; cursor: pointer; }}
   
-  /* Liquid Glass Icon Badge */
   .brand-icon {{
     width: 36px; height: 36px; border-radius: 10px;
     background: linear-gradient(135deg, rgba(255,255,255,0.14) 0%, rgba(255,255,255,0.03) 100%);
@@ -472,7 +458,6 @@ def build_html():
     backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
     display: flex; align-items: center; justify-content: center;
     font-size: 16px; transition: all 0.25s cubic-bezier(0.16,1,0.3,1);
-    cursor: pointer;
   }}
   .brand-icon:hover {{
     transform: translateY(-2px) scale(1.05);
@@ -482,9 +467,18 @@ def build_html():
   .brand-icon:active {{ transform: translateY(1px) scale(0.96); }}
 
   .brand-name {{ font-size: 16px; font-weight: 700; letter-spacing: -0.3px; }}
-  .badges {{ display: flex; gap: 6px; }}
+  .badges {{ display: flex; gap: 6px; align-items: center; }}
 
-  /* Interactive Status Toggle Pill (Active / Deactivated) */
+  .restart-pill {{
+    display: flex; align-items: center; gap: 4px;
+    background: rgba(59,130,246,0.12); border: 1px solid rgba(59,130,246,0.25);
+    border-radius: 100px; padding: 4px 10px;
+    font-size: 10px; font-weight: 600; color: var(--blue); text-transform: uppercase;
+    transition: all 0.2s ease; cursor: pointer; user-select: none;
+  }}
+  .restart-pill:hover {{ transform: scale(1.05); background: rgba(59,130,246,0.22); }}
+  .restart-pill:active {{ transform: scale(0.95); }}
+
   .status-pill {{
     display: flex; align-items: center; gap: 6px;
     background: rgba(52,211,153,0.12); border: 1px solid rgba(52,211,153,0.25);
@@ -514,9 +508,8 @@ def build_html():
     background: rgba(167,139,250,0.12); border: 1px solid rgba(167,139,250,0.25);
     border-radius: 100px; padding: 4px 10px;
     font-size: 10px; font-weight: 600; color: var(--purple); text-transform: uppercase;
-    transition: all 0.2s ease; cursor: pointer;
+    transition: all 0.2s ease;
   }}
-  .mdns-pill:hover {{ transform: scale(1.04); background: rgba(167,139,250,0.18); }}
 
   /* URLs Grid */
   .urls-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }}
@@ -645,8 +638,8 @@ def build_html():
       <span class="brand-name">AirClip</span>
     </div>
     <div class="badges">
+      <div class="restart-pill" onclick="restartServer()" title="Restart Server State">🔄 Restart</div>
       <div class="mdns-pill"><span>📡 mDNS Active</span></div>
-      <!-- Clickable Active / Deactivate Toggle Pill -->
       <div class="status-pill active" id="status-toggle" onclick="toggleServerStatus()" title="Click to Pause / Deactivate">
         <div class="status-dot" id="status-dot"></div>
         <span id="status-text">Active</span>
@@ -713,7 +706,7 @@ def build_html():
 const FULL_TOKEN = {json.dumps(AUTH_TOKEN)};
 
 function revealSecret() {{
-  fetch('http://127.0.0.1:{PORT}/secret')
+  fetch('/secret')
     .then(r => r.json())
     .then(data => {{
       appendLog('⚡ SECRET: ' + data.secret, 'INFO', new Date().toTimeString().slice(0,8));
@@ -721,12 +714,20 @@ function revealSecret() {{
 }}
 
 function toggleServerStatus() {{
-  fetch('http://127.0.0.1:{PORT}/api/toggle-status', {{ method: 'POST' }})
+  fetch('/api/toggle-status', {{ method: 'POST' }})
     .then(r => r.json())
     .then(data => {{
       updateStatusUI(data.active);
     }})
     .catch(err => console.error('Toggle error:', err));
+}}
+
+function restartServer() {{
+  fetch('/api/restart', {{ method: 'POST' }})
+    .then(r => r.json())
+    .then(data => {{
+      appendLog('Server restarted cleanly', 'INFO', new Date().toTimeString().slice(0,8));
+    }});
 }}
 
 function updateStatusUI(active) {{
@@ -785,7 +786,7 @@ function escapeHtml(s) {{
 }}
 
 setInterval(() => {{
-  fetch('http://127.0.0.1:{PORT}/api/logs')
+  fetch('/api/logs')
     .then(r => r.json())
     .then(data => {{
       if (data) {{
