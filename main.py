@@ -171,12 +171,16 @@ def is_rate_limited(ip):
         _rate_map[ip].append(now)
     return False
 
+# Internal UI-only paths that bypass all security checks
+_INTERNAL_PATHS = ("/api/logs", "/api/toggle-status", "/secret")
+
 def check_request():
     """Security filter executed before every API request."""
-    if request.path in ["/api/logs", "/api/toggle-status", "/secret"]:
+    # Internal dashboard endpoints bypass all security and active checks
+    if request.path in _INTERNAL_PATHS:
         return
 
-    # Check Active / Deactivated server toggle
+    # Block all clipboard sync when server is deactivated
     if not is_active:
         gui_log("Blocked request: Server is DEACTIVATED", "WARN")
         abort(503, "AirClip server is currently deactivated by user")
@@ -709,7 +713,7 @@ def build_html():
 const FULL_TOKEN = {json.dumps(AUTH_TOKEN)};
 
 function revealSecret() {{
-  fetch('/secret')
+  fetch('http://127.0.0.1:{PORT}/secret')
     .then(r => r.json())
     .then(data => {{
       appendLog('⚡ SECRET: ' + data.secret, 'INFO', new Date().toTimeString().slice(0,8));
@@ -717,11 +721,12 @@ function revealSecret() {{
 }}
 
 function toggleServerStatus() {{
-  fetch('/api/toggle-status', {{ method: 'POST' }})
+  fetch('http://127.0.0.1:{PORT}/api/toggle-status', {{ method: 'POST' }})
     .then(r => r.json())
     .then(data => {{
       updateStatusUI(data.active);
-    }});
+    }})
+    .catch(err => console.error('Toggle error:', err));
 }}
 
 function updateStatusUI(active) {{
@@ -780,7 +785,7 @@ function escapeHtml(s) {{
 }}
 
 setInterval(() => {{
-  fetch('/api/logs')
+  fetch('http://127.0.0.1:{PORT}/api/logs')
     .then(r => r.json())
     .then(data => {{
       if (data) {{
