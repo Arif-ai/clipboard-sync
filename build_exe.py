@@ -1,9 +1,5 @@
 """
 build_exe.py — Build AirClip.exe using PyInstaller
-
-Usage:
-    pip install pyinstaller
-    python build_exe.py
 """
 import os
 import shutil
@@ -23,21 +19,24 @@ cmd = [
     "--hidden-import", "pyperclip",
     "--hidden-import", "webview",
     "--hidden-import", "webview.platforms.winforms",
+    "--hidden-import", "webview.platforms.edgehtml",
+    "--hidden-import", "webview.platforms.edgechromium",
+    "--hidden-import", "webview.platforms.mshtml",
+    "--hidden-import", "clr",
+    "--hidden-import", "pythonnet",
     "--hidden-import", "zeroconf",
     "--hidden-import", "qrcode",
-    "--hidden-import", "pystray",
-    "--hidden-import", "pystray._win32",
     "main.py"
 ]
 
-print("Building AirClip.exe...")
+print("Building AirClip.exe with complete pywebview backends...")
 result = subprocess.run(cmd, cwd=".")
 
 if result.returncode == 0:
     if os.path.exists("AirClip.sh"):
         os.makedirs("dist", exist_ok=True)
         shutil.copy("AirClip.sh", "dist/AirClip.sh")
-    print("\n[SUCCESS] Build complete! AirClip.exe and AirClip.sh are ready in dist/")
+    print("\n[SUCCESS] Build complete! AirClip.exe is ready in dist/")
 else:
     print("\n[ERROR] Build failed.")
     sys.exit(1)
