@@ -21,6 +21,10 @@
 - **Send Shortcut (iPhone → PC)**: [Import Shortcut](https://www.icloud.com/shortcuts/09cb23ded9f84cd1a0eeea91450c5a49)
 - **Get Shortcut (PC → iPhone)**: [Import Shortcut](https://www.icloud.com/shortcuts/bc67f1f38b4c4be8bf1d33e50c5191c1)
 
+### 💡 Pro Tip: iPhone Back Tap & Automations
+- **Back Tap Trigger**: Go to `Settings > Accessibility > Touch > Back Tap` on iPhone. Assign **Double Tap** to run the **Send Shortcut** (iPhone → PC). Whenever you copy anything on iPhone, double tap the back of your phone to send it to PC instantly!
+- **Action Button**: If on iPhone 15 Pro / 16, bind the Action Button to run **Send Shortcut** or **Get Shortcut**.
+
 ---
 
 ## 🚀 Installation & Running
