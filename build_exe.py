@@ -25,6 +25,8 @@ cmd = [
     "--hidden-import", "webview.platforms.winforms",
     "--hidden-import", "zeroconf",
     "--hidden-import", "qrcode",
+    "--hidden-import", "pystray",
+    "--hidden-import", "pystray._win32",
     "main.py"
 ]
 

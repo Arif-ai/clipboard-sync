@@ -9,6 +9,7 @@ Features:
 - Security Hardening (Auth Token, LAN IP Filter, Rate Limiting, 10MB Payload Cap)
 - mDNS Auto-Discovery (_clipsync._tcp.local)
 - Apple Liquid Glass Dashboard UI with dark QR code setup
+- Background System Tray Execution (Minimizes to tray on close, runs silently)
 - Built-in Developer Secret (/secret)
 """
 
@@ -27,8 +28,10 @@ import json
 import pyperclip
 import webview
 import qrcode
+import pystray
+from pystray import MenuItem as item
 from collections import defaultdict
-from PIL import Image, ImageGrab
+from PIL import Image, ImageGrab, ImageDraw
 from flask import Flask, request, jsonify, send_file, Response, abort
 from zeroconf import Zeroconf, ServiceInfo
 
@@ -373,6 +376,40 @@ def generate_qr_base64(url):
         return base64.b64encode(buf.getvalue()).decode('utf-8')
     except Exception:
         return ""
+
+# ─── System Tray Background Execution ─────────────────────────────────────────
+def setup_system_tray():
+    """Run AirClip in System Tray notification area."""
+    def show_dashboard(icon, item):
+        if ui_window:
+            ui_window.show()
+            ui_window.restore()
+
+    def toggle_sync(icon, item):
+        global is_active
+        with _active_lock:
+            is_active = not is_active
+            status = "ACTIVE" if is_active else "DEACTIVATED"
+            gui_log(f"Server state changed to {status} via System Tray", "INFO")
+
+    def force_quit(icon, item):
+        gui_log("AirClip shutting down from System Tray", "INFO")
+        icon.stop()
+        os._exit(0)
+
+    # Create dark background 64x64 tray icon
+    tray_img = Image.new("RGBA", (64, 64), (14, 14, 20, 255))
+    draw = ImageDraw.Draw(tray_img)
+    draw.rounded_rectangle([4, 4, 60, 60], radius=12, fill=(14, 14, 20, 255), outline=(59, 130, 246, 255), width=2)
+    draw.polygon([(34, 10), (26, 30), (34, 30), (28, 54), (40, 28), (32, 28)], fill=(59, 130, 246, 255))
+
+    menu = (
+        item("Show Dashboard", show_dashboard, default=True),
+        item("Pause / Resume Sync", toggle_sync),
+        item("Quit AirClip (Free Port 5000)", force_quit),
+    )
+    tray = pystray.Icon("AirClip", tray_img, "AirClip ⚡ Universal Clipboard", menu)
+    tray.run()
 
 # ─── Flask Server Thread ───────────────────────────────────────────────────────
 def run_flask():
@@ -808,6 +845,13 @@ window.addEventListener('load', () => {{
 </body>
 </html>"""
 
+def on_window_closing():
+    """Minimize window to System Tray on close instead of exiting server."""
+    if ui_window:
+        ui_window.hide()
+        gui_log("AirClip minimized to System Tray — server active in background", "INFO")
+        return False  # Cancels window destruction to keep background server running
+
 # ─── Main Entry Point ─────────────────────────────────────────────────────────
 def main():
     global ui_window
@@ -824,7 +868,11 @@ def main():
     mdns_thread = threading.Thread(target=register_mdns, daemon=True)
     mdns_thread.start()
 
-    # 4. Initialize & launch pywebview Liquid Glass Dashboard Window
+    # 4. Start System Tray icon thread
+    tray_thread = threading.Thread(target=setup_system_tray, daemon=True)
+    tray_thread.start()
+
+    # 5. Initialize & launch pywebview Liquid Glass Dashboard Window
     html = build_html()
     window = webview.create_window(
         "AirClip ⚡",
@@ -835,6 +883,7 @@ def main():
         background_color="#08080c",
         frameless=False,
     )
+    window.events.closing += on_window_closing
     ui_window = window
     webview.start(debug=False)
 
