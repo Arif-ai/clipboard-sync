@@ -25,10 +25,37 @@ class HTMLTextExtractor(HTMLParser):
     def get_text(self):
         return "".join(self.result).strip()
 
+def extract_primary_url(text):
+    """Extract clean target URL if present in payload (e.g. LinkedIn/Twitter/Safari shares)."""
+    if not text:
+        return None
+    # 1. Google search redirect URL
+    if 'google.com/url?' in text:
+        match = re.search(r'https?://[^\s]*google\.com/url\?[^\s]+', text)
+        if match:
+            parsed = urllib.parse.urlparse(match.group(0))
+            qs = urllib.parse.parse_qs(parsed.query)
+            if 'q' in qs and qs['q']:
+                return qs['q'][0]
+            if 'url' in qs and qs['url']:
+                return qs['url'][0]
+
+    # 2. Extract standard HTTP/HTTPS URLs (excluding generic w3.org schemas)
+    urls = re.findall(r'https?://[^\s<>"\'`,;\)]+', text)
+    valid_urls = [u for u in urls if not u.startswith("http://www.w3.org") and not u.startswith("https://www.w3.org")]
+    if valid_urls:
+        return valid_urls[0]
+    return None
+
 def clean_html(html_str):
     if not html_str:
         return ""
     try:
+        # Check if payload contains a shared link URL first
+        target_url = extract_primary_url(html_str)
+        if target_url and ("function " in html_str or "<html" in html_str.lower() or "<!doctype" in html_str.lower()):
+            return target_url
+
         # Strip script, style, head, comments
         cleaned = re.sub(r'<script[^>]*>.*?</script>', '', html_str, flags=re.DOTALL | re.IGNORECASE)
         cleaned = re.sub(r'<style[^>]*>.*?</style>', '', cleaned, flags=re.DOTALL | re.IGNORECASE)
@@ -47,22 +74,20 @@ def clean_html(html_str):
             l = line.strip()
             if not l:
                 continue
-            if any(k in l for k in ['sourceMappingURL=', 'window.google', 'closureDynamicButton', 'Please click here if you are not redirected', 'SPDX-License-Identifier', 'Copyright Google']):
+            if any(k in l for k in [
+                'sourceMappingURL=', 'window.google', 'closureDynamicButton',
+                'Please click here if you are not redirected', 'SPDX-License-Identifier',
+                'Copyright Google', 'getDfd()', 'window.lazyloader', 'window.tracking',
+                'window.impressionTracking', 'window.ingraphTracking', 'window.appDetection',
+                'window.pemTracking', 'window.appRedirectCompleted', 'User Agreement', 'Cookie Policy'
+            ]):
                 continue
             lines.append(l)
             
         final_text = "\n".join(lines).strip()
         
-        # Extract Google Search redirect URLs automatically
-        if 'google.com/url?' in final_text:
-            match = re.search(r'https?://[^\s]*google\.com/url\?[^\s]+', final_text)
-            if match:
-                parsed = urllib.parse.urlparse(match.group(0))
-                qs = urllib.parse.parse_qs(parsed.query)
-                if 'q' in qs and qs['q']:
-                    return qs['q'][0]
-                if 'url' in qs and qs['url']:
-                    return qs['url'][0]
+        if target_url:
+            return target_url
 
         return final_text if final_text else html_str
     except Exception:
@@ -156,7 +181,5 @@ def extract_text_from_incoming(incoming_bytes):
     raw_text = incoming_bytes.decode('utf-8', errors='ignore').strip()
     if raw_text.startswith('{\\rtf1'):
         return extract_rtf_text(raw_text)
-    if raw_text.startswith('<html') or raw_text.startswith('<!DOCTYPE') or '<body' in raw_text.lower():
-        return clean_html(raw_text)
-
+    
     return clean_html(raw_text)
